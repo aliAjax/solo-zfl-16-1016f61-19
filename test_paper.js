@@ -1,5 +1,6 @@
-// 纸张库存与开料排期核心逻辑验证：node test_paper.js
+// 纸张库存与开料排期核心逻辑验证：在项目目录直接 `node test_paper.js`
 const fs = require("node:fs");
+const path = require("node:path");
 const vm = require("node:vm");
 const webcrypto = require("node:crypto").webcrypto;
 
@@ -66,7 +67,7 @@ const sandbox = {
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
-vm.runInNewContext(fs.readFileSync("/workspace/app.js", "utf8"), sandbox);
+vm.runInNewContext(fs.readFileSync(path.join(__dirname, "app.js"), "utf8"), sandbox);
 const T = sandbox.window.__PAPER_TEST__;
 const pristine = JSON.parse(JSON.stringify(T.getState())); // 初始默认数据快照
 
@@ -165,18 +166,18 @@ assert(orderB && orderB.status === "pending", "缺量允许保存为待开工");
 T.startOrder(orderB.id);
 assert(T.getState().cuttingOrders.find((o) => o.id === orderB.id).status === "pending", "待开工单缺量时点开工仍被拦住");
 
-// ---------- 6. 备料后开工 → 完成扣库存 + 回报边料 + 幂等 ----------
+// ---------- 6. 开工 → 完工结算：按【实际领用】扣库存 + 回报边料 + 幂等 ----------
 freshState();
 T.setPlannerInputs({ name: "单A", fw: 148, fh: 100, copies: 100, bleed: 3, waste: 5, gsm: 200, withGrain: true });
-T.setPlanner({ orderId: null, picks: T.autoPlanPicks(T.readPlanSpec(), null), sig: null });
+T.setPlanner({ orderId: null, mode: "create", picks: T.autoPlanPicks(T.readPlanSpec(), null), sig: null });
 T.saveOrder({ startNow: false });
 const orderA = T.getState().cuttingOrders.find((o) => o.name === "单A");
+assert(orderA.picks.reduce((s, p) => s + p.qty, 0) === 5, "计划领用 5 张（3边料+2原纸）");
 
-// 再造一张 B 单占用部分纸张（验证多单预留互斥不影响 A 的完成）
+// 再造一张 B 单占用部分纸张（验证多单预留互斥不影响 A 的完工结算）
 T.setPlannerInputs({ name: "单B", fw: 148, fh: 100, copies: 200, bleed: 3, waste: 5, gsm: 200, withGrain: true });
-T.setPlanner({ orderId: null, picks: T.autoPlanPicks(T.readPlanSpec(), null), sig: null });
+T.setPlanner({ orderId: null, mode: "create", picks: T.autoPlanPicks(T.readPlanSpec(), null), sig: null });
 T.saveOrder({ startNow: false });
-const orderBSpare = T.getState().cuttingOrders.find((o) => o.name === "单B");
 
 T.startOrder(orderA.id);
 assert(T.getState().cuttingOrders.find((o) => o.id === orderA.id).status === "cutting", "A 单可正常开工");
@@ -184,40 +185,66 @@ assert(T.getState().cuttingOrders.find((o) => o.id === orderA.id).status === "cu
 const fullBefore = T.getState().papers.find((p) => p.w === 1092 && p.h === 787 && p.gsm === 200).qty;
 const offcutGroupBefore = T.getState().papers.find((p) => p.kind === "offcut" && p.w === 520 && p.h === 300);
 const offcutBefore = offcutGroupBefore ? offcutGroupBefore.qty : 0;
-const edge45Before = T.getState().papers.find((p) => p.kind === "offcut" && p.w === 1092 && p.h === 45);
-const edge45Count = edge45Before ? edge45Before.qty : 0;
 
-T.completeOrder(orderA.id);
+// 进入完工结算：默认带出计划张数，可改成实际数
+T.beginComplete(orderA.id);
+assert(T.getPlanner().mode === "complete", "应进入完工结算模式");
+// 实际裁剪：3 张边料都用了，原纸实际只用了 1 张（计划是 2 张）
+T.getPlanner().picks.forEach((pick) => {
+  const group = T.getState().papers.find((p) => p.id === pick.groupId);
+  if (group.kind === "full") pick.qty = 1;
+});
+let settle = T.evaluatePlan(T.readPlanSpec(), T.getPlanner().picks, orderA.id);
+assert(settle.totalSheets === 4 && settle.produced === 67, `实际 4 张应出 67 份（18+49），实际 ${settle.totalSheets}/${settle.produced}`);
+assert(!settle.hasOver, "实际领用未超可用（本单自身预留不计占用）");
+
+// 结算超用必须被拦住
+T.getPlanner().picks.forEach((pick) => {
+  const group = T.getState().papers.find((p) => p.id === pick.groupId);
+  if (group.kind === "full") pick.qty = 16; // B 占 5 张，可用仅 15
+});
+settle = T.evaluatePlan(T.readPlanSpec(), T.getPlanner().picks, orderA.id);
+assert(settle.hasOver, "实际领用 16 > 可用 15，应判超用");
+T.confirmComplete();
+assert(T.getState().cuttingOrders.find((o) => o.id === orderA.id).status === "cutting", "结算超用不得完工，单据仍裁剪中");
+const fullUnchanged = T.getState().papers.find((p) => p.w === 1092 && p.h === 787 && p.gsm === 200).qty;
+assert(fullUnchanged === fullBefore, "结算被拦时不得扣库存");
+
+// 改回实际 1 张原纸，确认完工
+T.getPlanner().picks.forEach((pick) => {
+  const group = T.getState().papers.find((p) => p.id === pick.groupId);
+  if (group.kind === "full") pick.qty = 1;
+});
+T.confirmComplete();
 let aDone = T.getState().cuttingOrders.find((o) => o.id === orderA.id);
 assert(aDone.status === "completed" && aDone.actual, "A 单应完成并记录实际领用");
-assert(aDone.actual.sheetsUsed === 5 && aDone.actual.produced === 116, `实用 5 张实出 116 份（顺纹下边料每张6份×3 + 原纸49份×2），实际 ${aDone.actual.sheetsUsed}/${aDone.actual.produced}`);
+assert(aDone.actual.sheetsUsed === 4 && aDone.actual.produced === 67, `应按实际 4 张/67 份结算，实际 ${aDone.actual.sheetsUsed}/${aDone.actual.produced}`);
 
+// 按实际数量扣库存：只扣 1 张原纸（计划是 2 张，多出的预留释放）
 const fullAfter = T.getState().papers.find((p) => p.w === 1092 && p.h === 787 && p.gsm === 200).qty;
-assert(fullAfter === fullBefore - 2, `完成应扣 2 张原纸（${fullBefore}→${fullAfter}）`);
+assert(fullAfter === fullBefore - 1, `实际用1张原纸应只扣1（${fullBefore}→${fullAfter}）`);
 const offcutAfter = T.getState().papers.find((p) => p.kind === "offcut" && p.w === 520 && p.h === 300);
-assert((offcutAfter ? offcutAfter.qty : 0) === offcutBefore - 3, "完成应扣 3 张边料");
-const edge45After = T.getState().papers.find((p) => p.kind === "offcut" && p.w === 1092 && p.h === 45);
-assert(edge45After && edge45After.qty === edge45Count + 2, `应回报并合并 1092×45 边料（2张原纸各1条），实际 ${edge45After && edge45After.qty}`);
-const edge14After = T.getState().papers.find((p) => p.kind === "offcut" && p.w === 742 && p.h === 14);
-assert(edge14After && edge14After.qty === 2, `2张原纸各出1条 742×14，应共2张，实际 ${edge14After && edge14After.qty}`);
+assert((offcutAfter ? offcutAfter.qty : 0) === offcutBefore - 3, "完成应扣实际用掉的 3 张边料");
+// 边料按实际数量回报：1 张原纸 → 各 1 条；3 张边料 → 各 3 条
+assert((T.getState().papers.find((p) => p.kind === "offcut" && p.w === 1092 && p.h === 45) || {}).qty === 1, "应回报 1 张 1092×45 边料");
+assert((T.getState().papers.find((p) => p.kind === "offcut" && p.w === 742 && p.h === 14) || {}).qty === 1, "应回报 1 张 742×14 边料");
 const edgeFromOffcut1 = T.getState().papers.find((p) => p.kind === "offcut" && p.w === 520 && p.h === 88);
 const edgeFromOffcut2 = T.getState().papers.find((p) => p.kind === "offcut" && p.w === 212 && p.h === 58);
-assert(edgeFromOffcut1 && edgeFromOffcut1.qty === 3, `3张边料各裁出 520×88 一条，实际 ${edgeFromOffcut1 && edgeFromOffcut1.qty}`);
-assert(edgeFromOffcut2 && edgeFromOffcut2.qty === 3, `3张边料各裁出 212×58 一条，实际 ${edgeFromOffcut2 && edgeFromOffcut2.qty}`);
-assert(aDone.actual.edges.some((e) => e.w === 1092 && e.h === 45 && e.qty === 2), "actual.edges 应汇总边料清单");
+assert(edgeFromOffcut1 && edgeFromOffcut1.qty === 3, `3张边料各裁出 520×88，实际 ${edgeFromOffcut1 && edgeFromOffcut1.qty}`);
+assert(edgeFromOffcut2 && edgeFromOffcut2.qty === 3, `3张边料各裁出 212×58，实际 ${edgeFromOffcut2 && edgeFromOffcut2.qty}`);
+assert(aDone.actual.edges.some((e) => e.w === 1092 && e.h === 45 && e.qty === 1), "actual.edges 应按实际汇总边料");
+assert(aDone.picks.find((p) => p.groupSnapshot && p.groupSnapshot.kind === "full").qty === 1, "单据领用应回写为实际张数");
 
-// A 完成扣减后，B 的预留依然有效且可用量一致
-assert(T.availableQty(T.getState().papers.find((p) => p.w === 1092 && p.h === 787 && p.gsm === 200)) === 13, "A完成后 B 仍预留 5 张，可用应为 13");
+// 完工后该单不再预留：B 仍占 5 张，原纸可用 = 剩19-5=14
+assert(T.availableQty(T.getState().papers.find((p) => p.w === 1092 && p.h === 787 && p.gsm === 200)) === 14, "完工后实际未用的预留已释放，B 仍占 5 张");
 
-// 幂等：重复完成不得重复扣减
+// 幂等：对已完成单重复结算不得再扣
 const qtySnapshot = T.getState().papers.map((p) => [p.id, p.qty]);
-T.completeOrder(orderA.id);
-T.completeOrder(orderA.id);
+T.setPlanner({ orderId: orderA.id, mode: "complete", picks: aDone.picks.map((p) => ({ groupId: p.groupId, qty: p.qty })), sig: null });
+T.confirmComplete();
+T.confirmComplete();
 const qtyAgain = T.getState().papers.map((p) => [p.id, p.qty]);
-assert(JSON.stringify(qtySnapshot) === JSON.stringify(qtyAgain), "重复完成不得重复扣库存或再回报边料");
-
-// 完成后不再占用预留
-assert(T.reservedQty(T.getState().papers.find((p) => p.w === 1092 && p.h === 787 && p.gsm === 200).id) >= 0, "");
+assert(JSON.stringify(qtySnapshot) === JSON.stringify(qtyAgain), "重复完工不得重复扣库存或再回报边料");
 
 // ---------- 7. 取消释放预留 ----------
 freshState();

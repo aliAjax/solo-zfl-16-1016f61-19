@@ -458,6 +458,7 @@ const paperEls = {
   planMessage: document.querySelector("#planMessage"),
   planSaveBtn: document.querySelector("#planSaveBtn"),
   planStartBtn: document.querySelector("#planStartBtn"),
+  planCompleteBtn: document.querySelector("#planCompleteBtn"),
   planCancelEditBtn: document.querySelector("#planCancelEditBtn"),
   board: {
     pending: document.querySelector("#colPending"),
@@ -474,7 +475,8 @@ const paperEls = {
 };
 
 // 新建开料单时的工作草稿（还没保存进 state.cuttingOrders）
-let planner = { orderId: null, picks: [], sig: null };
+// mode: "create" | "edit" | "complete"（complete=完工结算，按实际领用结算）
+let planner = { orderId: null, picks: [], sig: null, mode: "create" };
 
 function clampInt(value, min, fallback) {
   const n = Math.round(Number(value));
@@ -544,6 +546,18 @@ function reservedQty(groupId) {
 
 function availableQty(group) {
   return Math.max(0, group.qty - reservedQty(group.id));
+}
+
+// 某单据视角下的可用量（不含它自己的预留），编辑/结算时用
+function availableExcludingOrder(group, ignoreOrderId) {
+  const reservedByOthers = state.cuttingOrders
+    .filter((order) => order.status === "pending" || order.status === "cutting")
+    .filter((order) => order.id !== ignoreOrderId)
+    .reduce(
+      (sum, order) => sum + order.picks.filter((pick) => pick.groupId === group.id).reduce((s, pick) => s + pick.qty, 0),
+      0
+    );
+  return Math.max(0, group.qty - reservedByOthers);
 }
 
 /* ---------- 排料计算 ---------- */
@@ -765,19 +779,58 @@ function evaluateOrderNow(order) {
   return evaluatePlan(spec, order.picks, order.id);
 }
 
-// 完成：按实际领用扣库存 + 回报边料；幂等
-function completeOrder(orderId) {
+// 进入完工结算：载入裁剪中单据，可调整实际领用张数
+function beginComplete(orderId) {
   const order = state.cuttingOrders.find((item) => item.id === orderId);
-  if (!order) return;
-  if (order.status === "completed") return; // 同一单重复完成不重复扣减
-  if (order.status !== "cutting") return;
+  if (!order || order.status !== "cutting") return;
+  planner = {
+    orderId: order.id,
+    mode: "complete",
+    picks: order.picks.map((pick) => ({ groupId: pick.groupId, qty: pick.qty })),
+    sig: null
+  };
+  paperEls.planName.value = order.name;
+  paperEls.planFW.value = order.fw;
+  paperEls.planFH.value = order.fh;
+  paperEls.planCopies.value = order.copies;
+  paperEls.planBleed.value = order.bleed;
+  paperEls.planWaste.value = order.waste;
+  ensureGsmOptions(order.gsm);
+  paperEls.planGsm.value = String(order.gsm);
+  paperEls.planWithGrain.checked = order.withGrain;
+  paperEls.plannerTitle.textContent = `完工结算：${order.name}`;
+  paperEls.planCancelEditBtn.hidden = false;
+  setSpecInputsDisabled(true);
+  renderPlanner();
+  paperEls.plannerTitle.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
 
-  const result = evaluateOrderNow(order);
-  // 记录实际回报的边料，按领用逐张裁剪
+// 完工确认：按实际领用扣库存 + 按实际数量回报边料；幂等
+function confirmComplete() {
+  const orderId = planner.orderId;
+  const order = state.cuttingOrders.find((item) => item.id === orderId);
+  if (!order || order.status !== "cutting") return;
+  const spec = {
+    fw: order.fw,
+    fh: order.fh,
+    copies: order.copies,
+    bleed: order.bleed,
+    waste: order.waste,
+    gsm: order.gsm,
+    withGrain: order.withGrain,
+    pieceW: order.fw + order.bleed * 2,
+    pieceH: order.fh + order.bleed * 2
+  };
+  const result = evaluatePlan(spec, planner.picks, order.id);
+  if (result.hasOver) {
+    showPlanMessage("实际领用超过可用库存（含其他单据预留），不得超用，请调整实际张数。", "warn");
+    return;
+  }
+
+  // 按实际领用逐张裁剪：扣库存 + 回报边料
   const returnedEdges = [];
   for (const row of result.rows) {
-    if (!row.group) continue;
-    // 扣库存（预留随之消失，净效果：可用减少 qty）
+    if (!row.group || row.qty <= 0) continue;
     row.group.qty -= row.qty;
     if (row.group.qty <= 0) {
       state.papers = state.papers.filter((item) => item.id !== row.group.id);
@@ -801,6 +854,14 @@ function completeOrder(orderId) {
 
   order.status = "completed";
   order.completedAt = new Date().toISOString();
+  order.picks = result.rows
+    .filter((row) => row.qty > 0)
+    .map((row) => ({
+      groupId: row.group ? row.group.id : null,
+      qty: row.qty,
+      perSheet: row.perSheet,
+      groupSnapshot: row.group ? serializeGroup(row.group) : order.picks.find((p) => p.groupId === row.group?.id)?.groupSnapshot || null
+    }));
   order.actual = {
     sheetsUsed: result.totalSheets,
     produced: result.produced,
@@ -808,7 +869,9 @@ function completeOrder(orderId) {
     edges: summarizeEdges(returnedEdges.filter(Boolean))
   };
   saveState();
+  resetPlanner();
   renderPaperAll();
+  showPlanMessage(`已按实际领用 ${result.totalSheets} 张结算，回报边料已入库。`, "ok");
 }
 
 function summarizeEdges(edges) {
@@ -846,7 +909,7 @@ function removeOrder(orderId) {
 function editOrder(orderId) {
   const order = state.cuttingOrders.find((item) => item.id === orderId);
   if (!order || order.status !== "pending") return;
-  planner = { orderId: order.id, picks: order.picks.map((pick) => ({ ...pick })) };
+  planner = { orderId: order.id, mode: "edit", picks: order.picks.map((pick) => ({ ...pick })), sig: null };
   paperEls.planName.value = order.name;
   paperEls.planFW.value = order.fw;
   paperEls.planFH.value = order.fh;
@@ -863,10 +926,17 @@ function editOrder(orderId) {
   paperEls.plannerTitle.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
+// 结算时锁定成品规格（按单据原规格结算，不在此修改）
+function setSpecInputsDisabled(disabled) {
+  ["planFW", "planFH", "planCopies", "planBleed", "planWaste", "planGsm", "planWithGrain"].forEach((key) => {
+    paperEls[key].disabled = disabled;
+  });
+}
+
 /* ---------- 渲染 ---------- */
 
 function resetPlanner() {
-  planner = { orderId: null, picks: [], sig: null };
+  planner = { orderId: null, picks: [], sig: null, mode: "create" };
   paperEls.planForm.reset();
   paperEls.planFW.value = 148;
   paperEls.planFH.value = 100;
@@ -874,6 +944,7 @@ function resetPlanner() {
   paperEls.planBleed.value = 3;
   paperEls.planWaste.value = 5;
   paperEls.planWithGrain.checked = true;
+  setSpecInputsDisabled(false);
   paperEls.plannerTitle.textContent = "新建开料单";
   paperEls.planCancelEditBtn.hidden = true;
   hidePlanMessage();
@@ -952,8 +1023,9 @@ function planSpecSig(spec) {
   return [spec.fw, spec.fh, spec.copies, spec.bleed, spec.waste, spec.gsm, spec.withGrain, planner.orderId].join("|");
 }
 
-// 规格变化时重新自动排料；手工清空/调整不被覆盖
+// 规格变化时重新自动排料；手工清空/调整不被覆盖；完工结算不自动排料
 function ensureAutoPicks(spec) {
+  if (planner.mode === "complete") return;
   const sig = planSpecSig(spec);
   if (planner.sig === null) {
     planner.picks = autoPlanPicks(spec, planner.orderId);
@@ -972,13 +1044,15 @@ function renderPlanner() {
 
   ensureAutoPicks(spec);
   const result = evaluatePlan(spec, planner.picks, planner.orderId);
+  const isComplete = planner.mode === "complete";
+  const qtyWord = isComplete ? "实际领用" : "领用";
 
   paperEls.planSummary.innerHTML = `
     <span>含出血尺寸 <b>${spec.pieceW}×${spec.pieceH}mm</b></span>
     <span>需出份数(含损耗) <b>${result.needed}</b></span>
-    <span>领用 <b>${result.totalSheets}</b> 张</span>
+    <span>${qtyWord} <b>${result.totalSheets}</b> 张</span>
     <span>可出 <b>${result.produced}</b> 份</span>
-    <span>缺口 <b style="color:${result.shortage ? "var(--red)" : "var(--green)"}">${result.shortage}</b> 份</span>
+    <span>${isComplete ? "较需求" : "缺口"} <b style="color:${result.shortage ? "var(--red)" : "var(--green)"}">${result.shortage}</b> 份</span>
   `;
 
   paperEls.planPicks.innerHTML = result.rows.length
@@ -989,16 +1063,16 @@ function renderPlanner() {
             ? row.edges.map((edge) => `${edge.w}×${edge.h}`).join("、")
             : "无边料";
           return `
-            <div class="pick-row ${row.over ? "over" : ""}">
+            <div class="pick-row ${row.over ? "over" : ""}" data-pick-row="${index}">
               <div class="pick-name">
                 ${group ? `${group.w}×${group.h} · ${group.gsm}g` : "纸组已不存在"}
                 <span class="sub">${group ? (group.kind === "offcut" ? "边料 · " : "原纸 · ") + grainLabel(group.grainAxis) : ""}</span>
               </div>
               <span title="单张可出">每张 ${row.perSheet} 份</span>
-              <span title="该组可出">共 ${row.produced} 份</span>
+              <span title="该组可出" data-field="produced">共 ${row.produced} 份</span>
               <span title="裁剪后边料">边料 ${escapeHtml(edgeText)}</span>
-              <span class="${row.over ? "over-note" : ""}">可用 ${row.avail}</span>
-              <input type="number" min="0" max="${Math.max(0, row.avail)}" value="${row.qty}" data-pick-qty="${index}" aria-label="领用张数" />
+              <span class="${row.over ? "over-note" : ""}" data-field="avail">可用 ${row.avail}</span>
+              <input type="number" min="0" max="${Math.max(0, row.avail)}" value="${row.qty}" data-pick-qty="${index}" aria-label="${qtyWord}张数" />
               <button type="button" class="mini-btn" data-pick-remove="${index}" title="移除">×</button>
             </div>
           `;
@@ -1006,10 +1080,75 @@ function renderPlanner() {
         .join("")
     : `<p class="empty-hint">没有匹配克重${spec.withGrain ? "且满足顺纹" : ""}的可用纸张，或纸张小于成品尺寸。</p>`;
 
+  // 模式按钮切换
+  paperEls.planSaveBtn.hidden = isComplete;
+  paperEls.planStartBtn.hidden = isComplete;
+  paperEls.planCompleteBtn.hidden = !isComplete;
+  paperEls.planCancelEditBtn.textContent = isComplete ? "放弃结算" : "放弃编辑";
+
   paperEls.planStartBtn.disabled = result.hasOver || result.shortage > 0;
   paperEls.planSaveBtn.disabled = result.hasOver;
+  paperEls.planCompleteBtn.disabled = result.hasOver;
+
   if (result.hasOver) {
-    showPlanMessage("存在超用：领用张数不得超过可用库存，请调小或移除。", "warn");
+    showPlanMessage("存在超用：领用张数不得超过可用库存（含其他单据预留），请调小或移除。", "warn");
+  } else if (isComplete) {
+    showPlanMessage(
+      result.shortage > 0
+        ? `按实际领用可出 ${result.produced} 份，较需求少 ${result.shortage} 份，仍可确认完工。`
+        : `实际领用充足，确认后按 ${result.totalSheets} 张扣库存并回报边料。`,
+      result.shortage > 0 ? "warn" : "ok"
+    );
+  } else if (result.shortage > 0) {
+    showPlanMessage(`缺量 ${result.shortage} 份：可以保存为待开工，但开工被拦住。`, "warn");
+  } else if (result.rows.length) {
+    showPlanMessage("份数充足，可保存或直接开工。", "ok");
+  } else {
+    hidePlanMessage();
+  }
+}
+
+// 输入实际/领用张数时的轻量刷新：只更新数字与状态，不重建行 DOM，焦点不丢
+function refreshPlannerLive() {
+  const spec = readPlanSpec();
+  const result = evaluatePlan(spec, planner.picks, planner.orderId);
+  const isComplete = planner.mode === "complete";
+  const qtyWord = isComplete ? "实际领用" : "领用";
+
+  paperEls.planSummary.innerHTML = `
+    <span>含出血尺寸 <b>${spec.pieceW}×${spec.pieceH}mm</b></span>
+    <span>需出份数(含损耗) <b>${result.needed}</b></span>
+    <span>${qtyWord} <b>${result.totalSheets}</b> 张</span>
+    <span>可出 <b>${result.produced}</b> 份</span>
+    <span>${isComplete ? "较需求" : "缺口"} <b style="color:${result.shortage ? "var(--red)" : "var(--green)"}">${result.shortage}</b> 份</span>
+  `;
+
+  result.rows.forEach((row, index) => {
+    const rowEl = paperEls.planPicks.querySelector(`[data-pick-row="${index}"]`);
+    if (!rowEl) return;
+    rowEl.classList.toggle("over", row.over);
+    const producedEl = rowEl.querySelector('[data-field="produced"]');
+    const availEl = rowEl.querySelector('[data-field="avail"]');
+    if (producedEl) producedEl.textContent = `共 ${row.produced} 份`;
+    if (availEl) {
+      availEl.textContent = `可用 ${row.avail}`;
+      availEl.classList.toggle("over-note", row.over);
+    }
+  });
+
+  paperEls.planStartBtn.disabled = result.hasOver || result.shortage > 0;
+  paperEls.planSaveBtn.disabled = result.hasOver;
+  paperEls.planCompleteBtn.disabled = result.hasOver;
+
+  if (result.hasOver) {
+    showPlanMessage("存在超用：领用张数不得超过可用库存（含其他单据预留），请调小或移除。", "warn");
+  } else if (isComplete) {
+    showPlanMessage(
+      result.shortage > 0
+        ? `按实际领用可出 ${result.produced} 份，较需求少 ${result.shortage} 份，仍可确认完工。`
+        : `实际领用充足，确认后按 ${result.totalSheets} 张扣库存并回报边料。`,
+      result.shortage > 0 ? "warn" : "ok"
+    );
   } else if (result.shortage > 0) {
     showPlanMessage(`缺量 ${result.shortage} 份：可以保存为待开工，但开工被拦住。`, "warn");
   } else if (result.rows.length) {
@@ -1021,15 +1160,17 @@ function renderPlanner() {
 
 function syncGroupAddOptions(spec) {
   const pickedIds = new Set(planner.picks.map((pick) => pick.groupId));
+  const availOf = (group) =>
+    planner.orderId ? availableExcludingOrder(group, planner.orderId) : availableQty(group);
   const candidates = state.papers
-    .filter((group) => group.gsm === spec.gsm && !pickedIds.has(group.id) && availableQty(group) > 0)
+    .filter((group) => group.gsm === spec.gsm && !pickedIds.has(group.id) && availOf(group) > 0)
     .sort((a, b) => (a.kind === b.kind ? 0 : a.kind === "offcut" ? -1 : 1));
   paperEls.planAddGroup.innerHTML = candidates.length
     ? candidates
         .map((group) => {
           const layout = layoutOnSheet(group, spec.pieceW, spec.pieceH, spec.withGrain);
           const fit = layout ? `每张${layout.count}份` : "放不下";
-          return `<option value="${group.id}">${group.kind === "offcut" ? "边料" : "原纸"} ${group.w}×${group.h} ${group.gsm}g（可用${availableQty(group)}，${fit}）</option>`;
+          return `<option value="${group.id}">${group.kind === "offcut" ? "边料" : "原纸"} ${group.w}×${group.h} ${group.gsm}g（可用${availOf(group)}，${fit}）</option>`;
         })
         .join("")
     : `<option value="">没有可加的同克重纸组</option>`;
@@ -1182,9 +1323,25 @@ paperEls.planPicks.addEventListener("input", (event) => {
   const input = event.target.closest("[data-pick-qty]");
   if (!input) return;
   const index = Number(input.dataset.pickQty);
-  const value = Math.max(0, clampInt(input.value, 0, 0));
+  // 允许输入过程中暂时为空（value="" → 0），不打断连续输入；失焦时规整
+  const raw = input.value.trim();
+  const value = raw === "" ? 0 : Math.max(0, clampInt(raw, 0, 0));
+  if (!planner.picks[index]) return;
   planner.picks[index].qty = value;
-  renderPlanner();
+  refreshPlannerLive();
+});
+
+paperEls.planPicks.addEventListener("focusout", (event) => {
+  const input = event.target.closest("[data-pick-qty]");
+  if (!input) return;
+  const index = Number(input.dataset.pickQty);
+  if (!planner.picks[index]) return;
+  const parsed = Math.round(Number(input.value));
+  const normalized = Number.isFinite(parsed) ? Math.max(0, parsed) : planner.picks[index].qty;
+  if (Number(input.value) !== normalized) {
+    planner.picks[index].qty = normalized;
+    renderPlanner();
+  }
 });
 
 paperEls.planPicks.addEventListener("click", (event) => {
@@ -1197,6 +1354,7 @@ paperEls.planPicks.addEventListener("click", (event) => {
 
 paperEls.planSaveBtn.addEventListener("click", () => saveOrder({ startNow: false }));
 paperEls.planStartBtn.addEventListener("click", () => saveOrder({ startNow: true }));
+paperEls.planCompleteBtn.addEventListener("click", confirmComplete);
 paperEls.planCancelEditBtn.addEventListener("click", () => {
   resetPlanner();
   renderPaperAll();
@@ -1205,7 +1363,7 @@ paperEls.planCancelEditBtn.addEventListener("click", () => {
 document.querySelector(".board").addEventListener("click", (event) => {
   const handlers = {
     orderStart: startOrder,
-    orderComplete: completeOrder,
+    orderComplete: beginComplete,
     orderCancel: cancelOrder,
     orderRemove: removeOrder,
     orderEdit: editOrder
@@ -1241,8 +1399,10 @@ if (typeof window !== "undefined" && window.__PAPER_TEST__) {
     availableQty,
     saveOrder,
     startOrder,
-    completeOrder,
+    beginComplete,
+    confirmComplete,
     cancelOrder,
+    availableExcludingOrder,
     setPlanner: (next) => { planner = next; },
     getPlanner: () => planner,
     readPlanSpec,
