@@ -13,6 +13,10 @@
           <p class="eyebrow">本地活字印章排版</p>
           <h1>活字排版工坊</h1>
         </div>
+        <nav class="view-tabs" aria-label="功能切换">
+          <button id="tabTypeset" class="tab-btn active" type="button" data-view="typeset">排版工作台</button>
+          <button id="tabPaper" class="tab-btn" type="button" data-view="paper">纸张与开料</button>
+        </nav>
         <div class="top-actions">
           <button id="saveDraftBtn" class="primary">保存草稿</button>
           <button id="exportBtn">导出预览图</button>
@@ -20,80 +24,173 @@
         </div>
       </header>
 
-      <section class="settings-bar" aria-label="版面设置">
-        <label>
-          纸张
-          <select id="paperSize">
-            <option value="postcard">明信片</option>
-            <option value="bookmark">书签</option>
-            <option value="square">方形小笺</option>
-          </select>
-        </label>
-        <label>
-          方向
-          <select id="flowMode">
-            <option value="horizontal">横排</option>
-            <option value="vertical">竖排</option>
-          </select>
-        </label>
-        <label>
-          网格
-          <input id="gridGap" type="range" min="4" max="18" value="8" />
-        </label>
-        <label>
-          作品名
-          <input id="workTitle" type="text" placeholder="例：晚风小笺" />
-        </label>
-      </section>
-
-      <section class="workspace">
-        <aside class="panel inventory-panel">
-          <div class="panel-head">
-            <h2>字模库</h2>
-            <span id="inventoryCount"></span>
-          </div>
-          <form id="typeForm" class="type-form">
-            <input id="charInput" maxlength="2" placeholder="字" required />
-            <input id="styleInput" placeholder="风格" required />
-            <input id="sizeInput" type="number" min="8" max="72" value="24" required />
-            <input id="quantityInput" type="number" min="1" max="99" value="3" required />
-            <select id="wearInput">
-              <option value="新">新</option>
-              <option value="微磨">微磨</option>
-              <option value="旧痕">旧痕</option>
+      <section id="typesetView" class="view-section">
+        <section class="settings-bar" aria-label="版面设置">
+          <label>
+            纸张
+            <select id="paperSize">
+              <option value="postcard">明信片</option>
+              <option value="bookmark">书签</option>
+              <option value="square">方形小笺</option>
             </select>
-            <button class="primary" type="submit">加入</button>
-          </form>
-          <div class="filter-row">
-            <input id="inventorySearch" type="search" placeholder="搜索字或风格" />
-            <select id="styleFilter">
-              <option value="all">全部风格</option>
+          </label>
+          <label>
+            方向
+            <select id="flowMode">
+              <option value="horizontal">横排</option>
+              <option value="vertical">竖排</option>
             </select>
-          </div>
-          <div id="typeList" class="type-list"></div>
-        </aside>
-
-        <section class="stage-wrap">
-          <div class="status-strip">
-            <div>
-              <strong id="selectedTypeLabel">未选择字模</strong>
-              <span>点击字模后，在版面格子中落字，也可拖拽字模到版面。</span>
-            </div>
-            <div id="shortageBadge" class="badge ok">数量充足</div>
-          </div>
-          <div id="stage" class="stage" aria-label="排版画布"></div>
+          </label>
+          <label>
+            网格
+            <input id="gridGap" type="range" min="4" max="18" value="8" />
+          </label>
+          <label>
+            作品名
+            <input id="workTitle" type="text" placeholder="例：晚风小笺" />
+          </label>
         </section>
 
-        <aside class="panel draft-panel">
+        <section class="workspace">
+          <aside class="panel inventory-panel">
+            <div class="panel-head">
+              <h2>字模库</h2>
+              <span id="inventoryCount"></span>
+            </div>
+            <form id="typeForm" class="type-form">
+              <input id="charInput" maxlength="2" placeholder="字" required />
+              <input id="styleInput" placeholder="风格" required />
+              <input id="sizeInput" type="number" min="8" max="72" value="24" required />
+              <input id="quantityInput" type="number" min="1" max="99" value="3" required />
+              <select id="wearInput">
+                <option value="新">新</option>
+                <option value="微磨">微磨</option>
+                <option value="旧痕">旧痕</option>
+              </select>
+              <button class="primary" type="submit">加入</button>
+            </form>
+            <div class="filter-row">
+              <input id="inventorySearch" type="search" placeholder="搜索字或风格" />
+              <select id="styleFilter">
+                <option value="all">全部风格</option>
+              </select>
+            </div>
+            <div id="typeList" class="type-list"></div>
+          </aside>
+
+          <section class="stage-wrap">
+            <div class="status-strip">
+              <div>
+                <strong id="selectedTypeLabel">未选择字模</strong>
+                <span>点击字模后，在版面格子中落字，也可拖拽字模到版面。</span>
+              </div>
+              <div id="shortageBadge" class="badge ok">数量充足</div>
+            </div>
+            <div id="stage" class="stage" aria-label="排版画布"></div>
+          </section>
+
+          <aside class="panel draft-panel">
+            <div class="panel-head">
+              <h2>草稿与核对</h2>
+              <span id="placedCount"></span>
+            </div>
+            <div id="usageList" class="usage-list"></div>
+            <div class="divider"></div>
+            <h3>已保存草稿</h3>
+            <div id="draftList" class="draft-list"></div>
+          </aside>
+        </section>
+      </section>
+
+      <section id="paperView" class="view-section" hidden>
+        <section class="paper-top">
+          <aside class="panel stock-panel">
+            <div class="panel-head">
+              <h2>纸张库存</h2>
+              <span id="stockCount"></span>
+            </div>
+            <form id="stockForm" class="stock-form">
+              <label>宽(mm)<input id="stockWidth" type="number" min="10" max="5000" value="787" required /></label>
+              <label>高(mm)<input id="stockHeight" type="number" min="10" max="5000" value="1092" required /></label>
+              <label>克重(g/㎡)<input id="stockGsm" type="number" min="20" max="800" step="1" value="200" required /></label>
+              <label>纹向
+                <select id="stockGrain">
+                  <option value="long">顺长纹（纹向长边）</option>
+                  <option value="short">顺短纹（纹向短边）</option>
+                </select>
+              </label>
+              <label>数量(张)<input id="stockQty" type="number" min="1" max="99999" value="10" required /></label>
+              <label>备注<input id="stockName" type="text" placeholder="如：全开棉纸（选填）" /></label>
+              <button class="primary" type="submit">入库</button>
+            </form>
+            <label class="stock-filter">
+              <input id="stockSearch" type="search" placeholder="按尺寸 / 克重 / 备注筛选" />
+            </label>
+            <div id="stockList" class="stock-list"></div>
+          </aside>
+
+          <section class="panel planner-panel">
+            <div class="panel-head">
+              <h2 id="plannerTitle">新建开料单</h2>
+              <span>成品尺寸含出血后排料</span>
+            </div>
+            <form id="planForm" class="plan-form">
+              <label class="wide">单据名<input id="planName" type="text" placeholder="例：晚风小笺 · 明信片" /></label>
+              <label>成品宽(mm)<input id="planFW" type="number" min="10" max="5000" value="148" required /></label>
+              <label>成品高(mm)<input id="planFH" type="number" min="10" max="5000" value="100" required /></label>
+              <label>数量(份)<input id="planCopies" type="number" min="1" max="999999" value="100" required /></label>
+              <label>出血(mm/边)<input id="planBleed" type="number" min="0" max="50" step="0.5" value="3" /></label>
+              <label>损耗(%)<input id="planWaste" type="number" min="0" max="100" step="0.5" value="5" /></label>
+              <label>克重(g/㎡)
+                <select id="planGsm"></select>
+              </label>
+              <label class="check-line">
+                <input id="planWithGrain" type="checkbox" checked />
+                <span>要求顺纹（纹向平行成品长边）</span>
+              </label>
+              <div class="plan-summary" id="planSummary"></div>
+              <div class="plan-picks-wrap">
+                <h3>领用与边料清单 <small>（可手工调整领用张数）</small></h3>
+                <div id="planPicks" class="plan-picks"></div>
+                <div class="plan-picks-actions">
+                  <select id="planAddGroup"></select>
+                  <button id="planAddPickBtn" type="button">＋ 增加领用纸组</button>
+                </div>
+              </div>
+              <p id="planMessage" class="plan-message" role="status"></p>
+              <div class="plan-actions">
+                <button id="planSaveBtn" class="primary" type="button">保存并预留</button>
+                <button id="planStartBtn" type="button">保存并开工</button>
+                <button id="planCancelEditBtn" type="button" hidden>放弃编辑</button>
+              </div>
+            </form>
+          </section>
+        </section>
+
+        <section class="panel board-panel">
           <div class="panel-head">
-            <h2>草稿与核对</h2>
-            <span id="placedCount"></span>
+            <h2>开料排期</h2>
+            <span>待开工 → 裁剪中 → 完成 / 取消</span>
           </div>
-          <div id="usageList" class="usage-list"></div>
-          <div class="divider"></div>
-          <h3>已保存草稿</h3>
-          <div id="draftList" class="draft-list"></div>
-        </aside>
+          <div class="board">
+            <div class="board-col" data-status="pending">
+              <div class="board-col-head"><h3>待开工</h3><span id="countPending" class="col-count">0</span></div>
+              <div id="colPending" class="board-cards"></div>
+            </div>
+            <div class="board-col" data-status="cutting">
+              <div class="board-col-head"><h3>裁剪中</h3><span id="countCutting" class="col-count">0</span></div>
+              <div id="colCutting" class="board-cards"></div>
+            </div>
+            <div class="board-col" data-status="completed">
+              <div class="board-col-head"><h3>完成</h3><span id="countCompleted" class="col-count">0</span></div>
+              <div id="colCompleted" class="board-cards"></div>
+            </div>
+            <div class="board-col" data-status="cancelled">
+              <div class="board-col-head"><h3>取消</h3><span id="countCancelled" class="col-count">0</span></div>
+              <div id="colCancelled" class="board-cards"></div>
+            </div>
+          </div>
+        </section>
       </section>
     </main>
 
